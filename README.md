@@ -9,6 +9,8 @@ you are.
 
 Keywords: auto-swoosh, all desktops, space switching, multiple desktops, menu bar utility, app hider, window management, tray icon, hide app, show app, macOS desktop, Spaces
 
+![Tuck in action](Tuck/screenshot.png)
+
 Each such app gets an icon on the right side of your menu bar. Click it to tuck the
 app away; click again and its window comes back **on whatever desktop you're currently
 on** — no Space switching, no getting yanked to another desktop.
