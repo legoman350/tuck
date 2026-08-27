@@ -9,11 +9,13 @@
 /* Begin PBXBuildFile section */
 		B8C9D0E1F2A1B2C3D4E5F6A7 /* Tuck.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6A7B8C9D0E1F2A1B2C3D4E5 /* Tuck.swift */; };
 		C8D9E0F1A2B3C4D5E6F7A8B9 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8E9F0A1B2C3D4E5F6A7B8C9 /* main.swift */; };
+		E9F0A1B2C3D4E5F6A7B8C9D0 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0A1B2C3D4E5F6A7B8C9D0E1 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		A7B8C9D0E1F2A1B2C3D4E5F6 /* Tuck.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Tuck.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D8E9F0A1B2C3D4E5F6A7B8C9 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		F0A1B2C3D4E5F6A7B8C9D0E1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F6A7B8C9D0E1F2A1B2C3D4E5 /* Tuck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tuck.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -39,6 +41,7 @@
 		C3D4E5F6A7B8C9D0E1F2A1B2 /* Tuck */ = {
 			isa = PBXGroup;
 			children = (
+				F0A1B2C3D4E5F6A7B8C9D0E1 /* Assets.xcassets */,
 				D8E9F0A1B2C3D4E5F6A7B8C9 /* main.swift */,
 				F6A7B8C9D0E1F2A1B2C3D4E5 /* Tuck.swift */,
 			);
@@ -106,6 +109,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E9F0A1B2C3D4E5F6A7B8C9D0 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
