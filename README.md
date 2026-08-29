@@ -51,7 +51,11 @@ To stop managing an app, set its Dock assignment back to **None**.
 | --- | --- |
 | Click an icon | Tuck the app away, or bring it back to this desktop |
 | Right-click (or ctrl-click) an icon | Menu: Show/Tuck, Tuck All Away, Auto-tuck, Refresh, Quit |
+| **⌘⇧H** (global) | Toggle: tuck all away, or bring them all back |
 | Dimmed icon | That app is currently tucked away |
+
+**⌘⇧H** is a system-wide hotkey: it hides every managed app at once, and pressing it
+again brings them all back.
 
 **Auto-tuck when app loses focus** (off by default) makes it behave like a real tray:
 the app hides itself the moment you click elsewhere. Turn it on from the right-click

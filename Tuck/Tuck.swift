@@ -22,6 +22,7 @@
 
 import Cocoa
 import ApplicationServices
+import Carbon
 
 // MARK: - Reading the Dock's "Assign To" setting
 
@@ -258,6 +259,45 @@ final class TrayEntry: NSObject {
     }
 }
 
+// MARK: - Global hotkey (⌘⇧H toggles hide / show all)
+
+final class GlobalHotKey {
+
+    private var hotKeyRef: EventHotKeyRef?
+    private var handlerRef: EventHandlerRef?
+    private let signature: OSType = 0x5443554B      // "TUCK"
+
+    var onPress: (() -> Void)?
+
+    func register(keyCode: UInt32, modifiers: UInt32) -> Bool {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
+        if handlerRef == nil {
+            let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+            var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                          eventKind: UInt32(kEventHotKeyPressed))
+            let callback: EventHandlerUPP = { _, _, userData in
+                guard let userData else { return noErr }
+                Unmanaged<GlobalHotKey>.fromOpaque(userData)
+                    .takeUnretainedValue().onPress?()
+                return noErr
+            }
+            let status = InstallEventHandler(GetApplicationEventTarget(), callback,
+                                             1, &eventType, selfPtr, &handlerRef)
+            if status != noErr { handlerRef = nil }
+        }
+        let hotKeyID = EventHotKeyID(signature: signature, id: 1)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID,
+                                         GetApplicationEventTarget(), 0, &ref)
+        guard status == noErr, let ref else { return false }
+        hotKeyRef = ref
+        return true
+    }
+}
+
 // MARK: - Controller
 
 final class Controller: NSObject {
@@ -266,6 +306,7 @@ final class Controller: NSObject {
     private var placeholder: TrayEntry?
     private var refreshTimer: Timer?
     private var lastClickAt: TimeInterval = 0
+    private var hotKey: GlobalHotKey?
 
     func start() {
         sync()
@@ -275,18 +316,55 @@ final class Controller: NSObject {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(appDeactivated(_:)),
             name: NSWorkspace.didDeactivateApplicationNotification, object: nil)
+
+        // ⌘⇧H — toggle "Tuck All Away " / "Show All".
+        let modifiers = UInt32(cmdKey | shiftKey)
+        hotKey = GlobalHotKey()
+        hotKey?.onPress = { [weak self] in self?.toggleAll() }
+        if hotKey?.register(keyCode: 4, modifiers: modifiers) == false {
+            hotKey = nil
+        }
+    }
+
+    func toggleAll() {
+        var anyVisible = false
+        for bundleID in entries.keys {
+            let running = NSRunningApplication
+                .runningApplications(withBundleIdentifier: bundleID)
+                .filter { !$0.isTerminated && !$0.isHidden }
+            if !running.isEmpty { anyVisible = true }
+        }
+        if anyVisible {
+            hideAll()
+        } else {
+            for bundleID in Array(entries.keys) {
+                let running = NSRunningApplication
+                    .runningApplications(withBundleIdentifier: bundleID)
+                    .filter { !$0.isTerminated }
+                for app in running {
+                    _ = app.unhide()
+                    Windows.activate(app)
+                }
+            }
+            sync()
+        }
     }
 
     // MARK: Keeping the icons in sync with the Dock setting
 
     func sync() {
         let assigned = SpacesPrefs.allDesktopsBundleIDs()
-        // Only show icons for apps that are actually running.
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap { app -> String? in
-            guard app.activationPolicy == .regular, !app.isTerminated else { return nil }
-            return app.bundleIdentifier
-        })
-        let wanted = assigned.intersection(running)
+        let assignedLower = Set(assigned.map { $0.lowercased() })
+        // Only show icons for apps that are actually running. Match bundle IDs
+        // case-insensitively: Spaces may store "com.apple.mobilesms" but the
+        // running app reports "com.apple.MobileSMS".
+        var wanted = Set<String>()
+        for app in NSWorkspace.shared.runningApplications {
+            guard app.activationPolicy == .regular, !app.isTerminated,
+                  let bundleID = app.bundleIdentifier,
+                  assignedLower.contains(bundleID.lowercased()) else { continue }
+            wanted.insert(bundleID)   // use the running app's canonical ID as key
+        }
 
         // Snapshot the keys: we mutate `entries` inside this loop.
         for bundleID in Array(entries.keys) where !wanted.contains(bundleID) {
@@ -412,7 +490,7 @@ final class Controller: NSObject {
             menu.addItem(.separator())
         }
 
-        let hideAllItem = NSMenuItem(title: "Tuck All Away",
+        let hideAllItem = NSMenuItem(title: "Tuck All Away  ⌘⇧H",
                                      action: #selector(menuHideAll(_:)), keyEquivalent: "")
         hideAllItem.target = self
         hideAllItem.isEnabled = !entries.isEmpty
