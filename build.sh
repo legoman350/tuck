@@ -17,12 +17,13 @@ command -v swiftc >/dev/null 2>&1 || {
 }
 
 echo "==> Compiling"
-rm -rf "$APP" "$BIN"
-swiftc -O -framework Cocoa -framework ApplicationServices -o "$BIN" Tuck/Tuck.swift
+# NOTE: never use "Tuck" as the compiler output path — it collides with the
+# source directory "Tuck/". Compile straight into the bundle instead.
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+swiftc -O -framework Cocoa -framework ApplicationServices -o "$APP/Contents/MacOS/$BIN" Tuck/main.swift Tuck/Tuck.swift
 
 echo "==> Assembling bundle"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-mv "$BIN" "$APP/Contents/MacOS/$BIN"
 
 cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
