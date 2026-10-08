@@ -85,6 +85,56 @@ enum Windows {
         return false
     }
 
+    /// Does this process own any normal (layer-0) window at all — on screen or not?
+    /// Uses `.optionAll` so minimized windows are counted too. Permission-free.
+    static func hasAnyWindow(pid: pid_t) -> Bool {
+        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        guard let infos = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        for info in infos {
+            guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner == pid else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            return true
+        }
+        return false
+    }
+
+    /// True when the app owns windows but none of them is on screen — i.e. the
+    /// window(s) are minimized. Uses `.optionAll`, so the minimized window is
+    /// still listed but reports `kCGWindowIsOnscreen == false`. Permission-free.
+    ///
+    /// Because Tuck only tracks apps assigned to "All Desktops", a live window
+    /// should be on screen on the current Space, so "none on screen" reduces to
+    /// "minimized" (rather than "on another Space").
+    static func isMinimized(pid: pid_t) -> Bool {
+        let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+        guard let infos = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        var anyWindow = false
+        for info in infos {
+            guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner == pid else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            anyWindow = true
+            if (info[kCGWindowIsOnscreen as String] as? Bool) == true { return false }
+        }
+        return anyWindow
+    }
+
+    /// Ask LaunchServices to reopen the app. For most (AppKit) apps this restores
+    /// a minimized window without any permission prompt. Behaviour is app-defined,
+    /// so callers should re-check and fall back to `activate` if nothing happened.
+    static func reopen(_ app: NSRunningApplication) {
+        guard let url = app.bundleURL else {
+            activate(app)
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in }
+    }
+
     /// Best-effort "open a window please". Requires Accessibility; no-op without it.
     static func requestNewWindow(pid: pid_t) {
         guard AXIsProcessTrusted() else { return }
@@ -214,12 +264,18 @@ final class TrayEntry: NSObject {
             return
         }
 
+        let name = app.localizedName ?? bundleID
+        let minimized = !app.isHidden && Windows.isMinimized(pid: app.processIdentifier)
         button.image = TrayEntry.menuBarIcon(for: app)
-        // Tucked away reads as dimmed; on screen reads as solid.
-        button.alphaValue = app.isHidden ? 0.45 : 1.0
-        button.toolTip = app.isHidden
-            ? "\(app.localizedName ?? bundleID) — click to show"
-            : "\(app.localizedName ?? bundleID) — click to tuck away"
+        // Tucked away (hidden or minimized) reads as dimmed; on screen reads as solid.
+        button.alphaValue = (app.isHidden || minimized) ? 0.45 : 1.0
+        if app.isHidden {
+            button.toolTip = "\(name) — click to show"
+        } else if minimized {
+            button.toolTip = "\(name) — minimized; click to restore"
+        } else {
+            button.toolTip = "\(name) — click to tuck away"
+        }
     }
 
     private static func menuBarIcon(for app: NSRunningApplication) -> NSImage? {
@@ -327,11 +383,13 @@ final class Controller: NSObject {
     }
 
     func toggleAll() {
+        // A minimized window counts as tucked away, not visible.
         var anyVisible = false
         for bundleID in entries.keys {
             let running = NSRunningApplication
                 .runningApplications(withBundleIdentifier: bundleID)
-                .filter { !$0.isTerminated && !$0.isHidden }
+                .filter { !$0.isTerminated && !$0.isHidden
+                    && Windows.hasVisibleWindow(pid: $0.processIdentifier) }
             if !running.isEmpty { anyVisible = true }
         }
         if anyVisible {
@@ -343,7 +401,11 @@ final class Controller: NSObject {
                     .filter { !$0.isTerminated }
                 for app in running {
                     _ = app.unhide()
-                    Windows.activate(app)
+                    if Windows.isMinimized(pid: app.processIdentifier) {
+                        Windows.reopen(app)
+                    } else {
+                        Windows.activate(app)
+                    }
                 }
             }
             sync()
@@ -398,8 +460,11 @@ final class Controller: NSObject {
             .runningApplications(withBundleIdentifier: bundleID)
             .first(where: { !$0.isTerminated }) else { return }
 
+        let pid = app.processIdentifier
         if app.isHidden {
             show(app)
+        } else if Windows.isMinimized(pid: pid) {
+            restore(app)
         } else if app.isActive {
             _ = app.hide()
         } else {
@@ -417,13 +482,33 @@ final class Controller: NSObject {
 
         let pid = app.processIdentifier
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
-            guard !Windows.hasVisibleWindow(pid: pid) else { return }
+            // Unhiding can leave a formerly-minimized window in the Dock.
+            if Windows.isMinimized(pid: pid) {
+                Windows.reopen(app)
+                return
+            }
+            // Genuinely no windows: ask for one (existing best-effort path).
+            guard !Windows.hasAnyWindow(pid: pid) else { return }
             Windows.requestNewWindow(pid: pid)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
                 if let a = NSRunningApplication(processIdentifier: pid) {
                     Windows.activate(a)
                 }
             }
+        }
+    }
+
+    /// Bring a minimized app's window back with a LaunchServices reopen, then
+    /// re-check (reopen is app-defined) and fall back to plain activation.
+    private func restore(_ app: NSRunningApplication) {
+        Windows.reopen(app)
+        let pid = app.processIdentifier
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            if let a = NSRunningApplication(processIdentifier: pid),
+               Windows.isMinimized(pid: pid) {
+                Windows.activate(a)
+            }
+            self?.sync()
         }
     }
 
