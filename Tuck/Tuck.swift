@@ -68,8 +68,11 @@ enum SpacesPrefs {
 
 enum Windows {
 
-    /// Does this process own at least one normal, on-screen window right now?
-    /// Reads only owner PID / layer / bounds, so no Screen Recording permission needed.
+    /// Does this process own at least one on-screen window right now?
+    ///
+    /// Counts windows at *any* layer, not just layer 0: media pop-outs and other
+    /// panels can live above layer 0. Reads only owner PID / layer / bounds, so
+    /// no Screen Recording permission needed.
     static func hasVisibleWindow(pid: pid_t) -> Bool {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let infos = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
@@ -77,7 +80,7 @@ enum Windows {
         }
         for info in infos {
             guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner == pid else { continue }
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0 else { continue }
             guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
                   let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
             if rect.width >= 60 && rect.height >= 60 { return true }
@@ -85,7 +88,7 @@ enum Windows {
         return false
     }
 
-    /// Does this process own any normal (layer-0) window at all — on screen or not?
+    /// Does this process own any window at all (any layer) — on screen or not?
     /// Uses `.optionAll` so minimized windows are counted too. Permission-free.
     static func hasAnyWindow(pid: pid_t) -> Bool {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
@@ -94,16 +97,19 @@ enum Windows {
         }
         for info in infos {
             guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner == pid else { continue }
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0 else { continue }
             return true
         }
         return false
     }
 
-    /// True when the app owns windows but none of them is on screen — i.e. the
-    /// window(s) are minimized. Uses `.optionAll`, so the minimized window is
-    /// still listed but reports `kCGWindowIsOnscreen == false`. Permission-free.
+    /// True when the app owns a normal window but nothing of its is on screen —
+    /// i.e. the window(s) are minimized. Uses `.optionAll`, so the minimized
+    /// window is still listed but reports `kCGWindowIsOnscreen == false`.
+    /// Permission-free.
     ///
+    /// Any on-screen window counts (including pop-outs above layer 0), so a
+    /// visible media pop-out makes the app "not minimized" and therefore tuckable.
     /// Because Tuck only tracks apps assigned to "All Desktops", a live window
     /// should be on screen on the current Space, so "none on screen" reduces to
     /// "minimized" (rather than "on another Space").
@@ -112,14 +118,14 @@ enum Windows {
         guard let infos = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return false
         }
-        var anyWindow = false
+        var anyNormalWindow = false
         for info in infos {
             guard let owner = info[kCGWindowOwnerPID as String] as? pid_t, owner == pid else { continue }
-            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
-            anyWindow = true
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer >= 0 else { continue }
+            if layer == 0 { anyNormalWindow = true }
             if (info[kCGWindowIsOnscreen as String] as? Bool) == true { return false }
         }
-        return anyWindow
+        return anyNormalWindow
     }
 
     /// Ask LaunchServices to reopen the app. For most (AppKit) apps this restores
@@ -509,11 +515,9 @@ final class Controller: NSObject {
             show(app)
         } else if Windows.isMinimized(pid: pid) {
             restore(app)
-        } else if app.isActive {
-            _ = app.hide()
         } else {
-            // Visible but behind something: bring it forward rather than hiding it.
-            show(app)
+            // Has a visible window (incl. a media popout): tuck it away.
+            _ = app.hide()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.sync()
