@@ -205,22 +205,61 @@ enum Windows {
 // MARK: - Preferences
 
 enum Settings {
-    private static let key = "autoHideBundleIDs"
 
-    static var autoHideBundleIDs: Set<String> {
-        get { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
-        set { UserDefaults.standard.set(Array(newValue), forKey: key) }
+    /// Per-app auto-tuck trigger. Default is `.switchSpace`.
+    enum AutoTuckMode: String {
+        case none
+        case loseFocus
+        case switchSpace
+
+        var title: String {
+            switch self {
+            case .none:        return "Off"
+            case .loseFocus:   return "When it loses focus"
+            case .switchSpace: return "When switching Spaces"
+            }
+        }
     }
 
-    static func isAutoHideEnabled(for bundleID: String) -> Bool {
-        autoHideBundleIDs.contains(bundleID)
+    private static let modesKey = "autoTuckModes"                 // [bundleID: modeRawValue]
+    private static let legacyKey = "autoHideBundleIDs"            // old Set<String>
+    private static let newWindowKey = "autoRequestNewWindowBundleIDs"
+
+    /// One-time migration: the old boolean auto-hide becomes `.loseFocus`.
+    private static func migrateIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: legacyKey) != nil else { return }
+        var modes = defaults.dictionary(forKey: modesKey) as? [String: String] ?? [:]
+        for id in defaults.stringArray(forKey: legacyKey) ?? [] where modes[id] == nil {
+            modes[id] = AutoTuckMode.loseFocus.rawValue
+        }
+        defaults.set(modes, forKey: modesKey)
+        defaults.removeObject(forKey: legacyKey)
     }
 
-    static func toggleAutoHide(for bundleID: String) {
-        var ids = autoHideBundleIDs
-        if ids.contains(bundleID) { ids.remove(bundleID) }
-        else { ids.insert(bundleID) }
-        autoHideBundleIDs = ids
+    static func autoTuckMode(for bundleID: String) -> AutoTuckMode {
+        migrateIfNeeded()
+        let modes = UserDefaults.standard.dictionary(forKey: modesKey) as? [String: String] ?? [:]
+        return modes[bundleID].flatMap(AutoTuckMode.init(rawValue:)) ?? .switchSpace
+    }
+
+    static func setAutoTuckMode(_ mode: AutoTuckMode, for bundleID: String) {
+        migrateIfNeeded()
+        var modes = UserDefaults.standard.dictionary(forKey: modesKey) as? [String: String] ?? [:]
+        modes[bundleID] = mode.rawValue
+        UserDefaults.standard.set(modes, forKey: modesKey)
+    }
+
+    // MARK: Auto request a new window when an app has none (default off)
+
+    static func isAutoRequestNewWindowEnabled(for bundleID: String) -> Bool {
+        Set(UserDefaults.standard.stringArray(forKey: newWindowKey) ?? []).contains(bundleID)
+    }
+
+    static func toggleAutoRequestNewWindow(for bundleID: String) {
+        var ids = Set(UserDefaults.standard.stringArray(forKey: newWindowKey) ?? [])
+        if ids.contains(bundleID) { ids.remove(bundleID) } else { ids.insert(bundleID) }
+        UserDefaults.standard.set(Array(ids), forKey: newWindowKey)
     }
 }
 
@@ -363,15 +402,20 @@ final class Controller: NSObject {
     private var refreshTimer: Timer?
     private var lastClickAt: TimeInterval = 0
     private var hotKey: GlobalHotKey?
+    private var spaceChangeWorkItem: DispatchWorkItem?
 
     func start() {
         sync()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.sync()
         }
-        NSWorkspace.shared.notificationCenter.addObserver(
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(
             self, selector: #selector(appDeactivated(_:)),
             name: NSWorkspace.didDeactivateApplicationNotification, object: nil)
+        center.addObserver(
+            self, selector: #selector(activeSpaceChanged(_:)),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
 
         // ⌘⇧H — toggle "Tuck All Away " / "Show All".
         let modifiers = UInt32(cmdKey | shiftKey)
@@ -481,14 +525,17 @@ final class Controller: NSObject {
         Windows.activate(app)
 
         let pid = app.processIdentifier
+        let bundleID = app.bundleIdentifier
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
             // Unhiding can leave a formerly-minimized window in the Dock.
             if Windows.isMinimized(pid: pid) {
                 Windows.reopen(app)
                 return
             }
-            // Genuinely no windows: ask for one (existing best-effort path).
-            guard !Windows.hasAnyWindow(pid: pid) else { return }
+            // Genuinely no windows: ask for one, only if enabled for this app.
+            guard let bundleID,
+                  Settings.isAutoRequestNewWindowEnabled(for: bundleID),
+                  !Windows.hasAnyWindow(pid: pid) else { return }
             Windows.requestNewWindow(pid: pid)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
                 if let a = NSRunningApplication(processIdentifier: pid) {
@@ -528,7 +575,7 @@ final class Controller: NSObject {
                 as? NSRunningApplication,
               let bundleID = app.bundleIdentifier,
               entries[bundleID] != nil,
-              Settings.isAutoHideEnabled(for: bundleID) else { return }
+              Settings.autoTuckMode(for: bundleID) == .loseFocus else { return }
 
         // Clicking our own menu bar icon deactivates the front app; don't treat
         // that as "user moved on".
@@ -543,6 +590,39 @@ final class Controller: NSObject {
             _ = app.hide()
             self.sync()
         }
+    }
+
+    // MARK: Auto-tuck on Space switch
+
+    @objc private func activeSpaceChanged(_ note: Notification) {
+        // Space changes arrive in bursts (animation, full-screen transitions);
+        // debounce so we tuck once per switch.
+        spaceChangeWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.tuckForSpaceChange() }
+        spaceChangeWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.40, execute: work)
+    }
+
+    /// Hide every tracked app in `.switchSpace` mode except the frontmost one.
+    private func tuckForSpaceChange() {
+        // Restoring an app can itself trigger a space change; ignore our own.
+        if Date().timeIntervalSince1970 - lastClickAt < 1.0 { return }
+
+        let front = NSWorkspace.shared.frontmostApplication
+        if front?.processIdentifier == getpid() { return }
+        let frontPid = front?.processIdentifier
+
+        var changed = false
+        for bundleID in entries.keys where Settings.autoTuckMode(for: bundleID) == .switchSpace {
+            for app in NSRunningApplication
+                .runningApplications(withBundleIdentifier: bundleID)
+                .filter({ !$0.isTerminated && !$0.isHidden }) {
+                if app.processIdentifier == frontPid { continue }   // spare the frontmost
+                _ = app.hide()
+                changed = true
+            }
+        }
+        if changed { sync() }
     }
 
     // MARK: Menu
@@ -582,12 +662,31 @@ final class Controller: NSObject {
         menu.addItem(hideAllItem)
 
         if !entry.bundleID.isEmpty {
-            let autoItem = NSMenuItem(title: "Auto-tuck when app loses focus",
-                                      action: #selector(menuToggleAutoHide(_:)), keyEquivalent: "")
-            autoItem.target = self
-            autoItem.representedObject = entry.bundleID
-            autoItem.state = Settings.isAutoHideEnabled(for: entry.bundleID) ? .on : .off
-            menu.addItem(autoItem)
+            let bundleID = entry.bundleID
+            let current = Settings.autoTuckMode(for: bundleID)
+
+            let autoParent = NSMenuItem(title: "Auto-tuck", action: nil, keyEquivalent: "")
+            let autoMenu = NSMenu()
+            for (index, mode) in Self.autoTuckModes.enumerated() {
+                let item = NSMenuItem(title: mode.title,
+                                      action: #selector(menuSetAutoTuckMode(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                item.representedObject = bundleID
+                item.state = (mode == current) ? .on : .off
+                autoMenu.addItem(item)
+            }
+            autoParent.submenu = autoMenu
+            menu.addItem(autoParent)
+
+            let newWindowItem = NSMenuItem(title: "Open a new window when app has none",
+                                           action: #selector(menuToggleAutoRequestWindow(_:)),
+                                           keyEquivalent: "")
+            newWindowItem.target = self
+            newWindowItem.representedObject = bundleID
+            newWindowItem.state = Settings.isAutoRequestNewWindowEnabled(for: bundleID) ? .on : .off
+            menu.addItem(newWindowItem)
         }
 
         let refreshItem = NSMenuItem(title: "Refresh",
@@ -611,9 +710,18 @@ final class Controller: NSObject {
 
     @objc private func menuRefresh(_ sender: NSMenuItem) { sync() }
 
-    @objc private func menuToggleAutoHide(_ sender: NSMenuItem) {
+    /// Index order must match the menu built in `buildMenu`.
+    private static let autoTuckModes: [Settings.AutoTuckMode] = [.none, .loseFocus, .switchSpace]
+
+    @objc private func menuSetAutoTuckMode(_ sender: NSMenuItem) {
+        guard let bundleID = sender.representedObject as? String,
+              sender.tag >= 0, sender.tag < Self.autoTuckModes.count else { return }
+        Settings.setAutoTuckMode(Self.autoTuckModes[sender.tag], for: bundleID)
+    }
+
+    @objc private func menuToggleAutoRequestWindow(_ sender: NSMenuItem) {
         guard let bundleID = sender.representedObject as? String else { return }
-        Settings.toggleAutoHide(for: bundleID)
+        Settings.toggleAutoRequestNewWindow(for: bundleID)
     }
 }
 
